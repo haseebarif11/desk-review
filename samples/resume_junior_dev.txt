@@ -1,0 +1,18 @@
+Alex Chen
+Software Engineer | alex.chen@email.com | github.com/alexchen
+
+EXPERIENCE
+Junior Developer, StartupCo (2022–2024)
+- Built features for a web app using Python and Flask
+- Fixed bugs and wrote unit tests
+- Participated in daily standups and code reviews
+
+Intern, Tech Labs (Summer 2021)
+- Assisted senior engineers with API development
+- Wrote documentation for internal tools
+
+EDUCATION
+B.S. Computer Science, State University, 2022
+
+SKILLS
+Python, JavaScript, HTML, CSS, Git, SQL

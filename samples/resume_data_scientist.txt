@@ -1,0 +1,22 @@
+Jordan Rivera
+Senior Data Scientist | jordan.rivera@email.com | linkedin.com/in/jrivera
+
+SUMMARY
+Data scientist with 6+ years building ML models and analytics pipelines for e-commerce and fintech.
+
+EXPERIENCE
+Senior Data Scientist, FinServe Inc. (2020–Present)
+- Led churn prediction model reducing customer attrition by 18% YoY
+- Built A/B testing framework used by 4 product teams
+- Mentored 3 junior data scientists on feature engineering best practices
+
+Data Scientist, ShopNow (2018–2020)
+- Developed recommendation engine increasing average order value by 12%
+- Created dashboards in Tableau for executive KPI reporting
+
+EDUCATION
+M.S. Statistics, Tech Institute, 2018
+B.S. Mathematics, State College, 2016
+
+SKILLS
+Python, pandas, scikit-learn, SQL, Spark, Jupyter, statistics, machine learning, A/B testing

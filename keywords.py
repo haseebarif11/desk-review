@@ -1,0 +1,118 @@
+"""Lightweight role-to-keyword lookup for retrieval grounding."""
+
+from __future__ import annotations
+
+ROLE_KEYWORDS: dict[str, list[str]] = {
+    "software engineer": [
+        "python",
+        "javascript",
+        "git",
+        "api",
+        "rest",
+        "sql",
+        "agile",
+        "ci/cd",
+        "testing",
+        "debugging",
+        "object-oriented",
+        "data structures",
+    ],
+    "data scientist": [
+        "python",
+        "machine learning",
+        "statistics",
+        "pandas",
+        "numpy",
+        "scikit-learn",
+        "sql",
+        "visualization",
+        "jupyter",
+        "a/b testing",
+        "feature engineering",
+        "model evaluation",
+    ],
+    "product manager": [
+        "roadmap",
+        "stakeholders",
+        "user research",
+        "kpis",
+        "agile",
+        "scrum",
+        "prioritization",
+        "cross-functional",
+        "go-to-market",
+        "metrics",
+        "requirements",
+        "backlog",
+    ],
+    "ux designer": [
+        "user research",
+        "wireframes",
+        "prototypes",
+        "figma",
+        "usability testing",
+        "information architecture",
+        "accessibility",
+        "design systems",
+        "personas",
+        "journey mapping",
+        "interaction design",
+        "visual design",
+    ],
+    "devops engineer": [
+        "kubernetes",
+        "docker",
+        "terraform",
+        "ci/cd",
+        "aws",
+        "monitoring",
+        "linux",
+        "ansible",
+        "infrastructure as code",
+        "jenkins",
+        "github actions",
+        "incident response",
+    ],
+    "marketing manager": [
+        "seo",
+        "content strategy",
+        "campaigns",
+        "analytics",
+        "brand",
+        "social media",
+        "crm",
+        "conversion",
+        "market research",
+        "copywriting",
+        "email marketing",
+        "roi",
+    ],
+}
+
+
+def get_keywords_for_role(role: str) -> list[str]:
+    """
+    Return curated keywords for a target role.
+
+    Uses exact match first, then partial substring match against known roles.
+    Falls back to a generic professional keyword set when no role matches.
+    """
+    normalized = " ".join(role.lower().split())
+
+    if normalized in ROLE_KEYWORDS:
+        return list(ROLE_KEYWORDS[normalized])
+
+    for known_role, keywords in ROLE_KEYWORDS.items():
+        if known_role in normalized or normalized in known_role:
+            return list(keywords)
+
+    return [
+        "communication",
+        "collaboration",
+        "problem solving",
+        "leadership",
+        "project management",
+        "analytical",
+        "results-driven",
+        "stakeholder management",
+    ]
