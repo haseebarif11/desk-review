@@ -7,32 +7,41 @@ Short reference for how the app works and why it is built this way.
 ```mermaid
 sequenceDiagram
     participant User
-    participant Gradio
+    participant Frontend
+    participant Flask
     participant Core
     participant Keywords
     participant Anthropic
 
-    User->>Gradio: Paste resume + target role
-    Gradio->>Gradio: Pydantic input validation
-    Gradio->>Gradio: Per-IP rate limit check
-    Gradio->>Core: analyze_resume(...)
+    User->>Frontend: Paste resume + target role
+    Frontend->>Frontend: Client-side validation
+    Frontend->>Flask: POST /api/analyze (JSON)
+    Flask->>Flask: Pydantic input validation
+    Flask->>Flask: Rate limit check
+    Flask->>Core: analyze_resume(...)
     Core->>Keywords: get_keywords_for_role(role)
     Keywords-->>Core: Curated keyword list
     Core->>Anthropic: Prompt with resume + keywords
     Anthropic-->>Core: JSON feedback
     Core->>Core: Parse + schema validate output
-    Core-->>Gradio: Structured dict
-    Gradio->>User: Render Markdown feedback
+    Core-->>Flask: Structured dict
+    Flask-->>Frontend: 200 + structured JSON
+    Frontend->>User: Render score, lists, rewrites
 ```
 
 ## Components
 
-### Gradio UI (`app.py`)
+### Frontend (`templates/`, `static/`)
 
-- Gradio Blocks form for resume, target role, and optional job description
-- `GET /healthz` — liveness probe on Gradio's underlying FastAPI app
+Single-page form. Validates input before submit, shows inline errors, disables the button with a spinner during the API call, and handles network errors plus malformed server responses (HTTP 502 with `INVALID_MODEL_OUTPUT`).
 
-Responsibilities: validation, per-IP rate limiting, logging (metadata only, no PII), calling `core.analyze_resume`, and rendering results as Markdown.
+### Flask API (`app.py`)
+
+- `POST /api/analyze` — main endpoint
+- `GET /` — serves the UI
+- `GET /healthz` — liveness probe for Render health checks (`@limiter.exempt`)
+
+Responsibilities: validation, rate limiting, logging (metadata only, no PII), calling `core.analyze_resume`, and mapping errors to HTTP status codes.
 
 ### Analysis core (`core.py`)
 
@@ -54,19 +63,21 @@ This is intentionally lightweight retrieval — not RAG over documents:
 
 ## Error handling
 
-| User-facing message | When |
-|-------|------|
-| Validation failed | Invalid input (Pydantic) |
-| Rate limit exceeded | Per-IP limit in Gradio handler |
-| AI returned malformed data | Unparseable or schema-invalid AI output |
-| AI service is busy / unavailable / timed out | Anthropic API errors |
+| Status | When |
+|--------|------|
+| 400 | Invalid JSON or failed input validation |
+| 429 | Rate limit exceeded (Flask-Limiter) |
+| 502 | Unparseable or schema-invalid AI output |
+| 503 | Anthropic rate limit or 5xx after retries |
+| 504 | Anthropic timeout |
 
 ## Security model
 
-- `ANTHROPIC_API_KEY` is read only on the server — never logged or sent to the browser
+- `ANTHROPIC_API_KEY` is read only on the server — never logged or sent to the frontend
+- CORS is opt-in via `CORS_ORIGINS` for split frontend/backend hosting
 
 ## Interview talking points
 
-1. **Defense in depth:** validate on input (Pydantic), enforce rate limits, and validate AI output again before display.
+1. **Defense in depth:** validate on client (UX), server (security), and again on AI output (reliability).
 2. **Retrieval without over-engineering:** `keywords.py` shows grounding without jumping to a vector DB on day one.
 3. **Operational hygiene:** rate limits, retries, timeouts, and no PII in logs.

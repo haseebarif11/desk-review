@@ -1,200 +1,172 @@
-"""Desk Review — Gradio UI for Hugging Face ZeroGPU Spaces."""
+"""Desk Review — Flask application."""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from typing import Any
 
 import anthropic
-import gradio as gr
-import spaces
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from pydantic import ValidationError
 
 from core import AnalyzeRequest, Config, analyze_resume, configure_logging
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 
-config: Config | None = None
+def create_app(config: Config | None = None) -> Flask:
+    """Application factory for Flask and tests."""
+    app_config = config or Config.from_env()
+    configure_logging(app_config.log_level)
+
+    app = Flask(__name__)
+    app.config["DESK_REVIEW_CONFIG"] = app_config
+    app.secret_key = app_config.flask_secret_key
+
+    if app_config.cors_origins:
+        origins = [origin.strip() for origin in app_config.cors_origins.split(",")]
+        CORS(app, resources={r"/api/*": {"origins": origins}})
+        logger.info("CORS enabled for origins: %s", origins)
+
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        default_limits=[app_config.rate_limit_default],
+        storage_uri="memory://",
+    )
+
+    @app.route("/healthz")
+    @limiter.exempt
+    def healthz() -> tuple[Any, int]:
+        """Lightweight liveness probe for platform health checks."""
+        return jsonify({"status": "ok"}), 200
+
+    @app.route("/")
+    def index() -> str:
+        """Serve the single-page frontend."""
+        return render_template("index.html")
+
+    @app.route("/api/analyze", methods=["POST"])
+    @limiter.limit(app_config.rate_limit_default)
+    def analyze() -> tuple[Any, int]:
+        """Analyze a resume and return structured feedback."""
+        started = time.perf_counter()
+        client_ip = get_remote_address()
+
+        if not request.is_json:
+            logger.warning("analyze rejected: non-json request ip=%s", client_ip)
+            return jsonify({"error": "Content-Type must be application/json"}), 400
+
+        payload = request.get_json(silent=True)
+        if payload is None:
+            logger.warning("analyze rejected: invalid json ip=%s", client_ip)
+            return jsonify({"error": "Invalid JSON body"}), 400
+
+        try:
+            analyze_request = AnalyzeRequest.model_validate(payload)
+        except ValidationError as exc:
+            logger.warning(
+                "analyze rejected: validation error ip=%s errors=%s",
+                client_ip,
+                exc.error_count(),
+            )
+            return jsonify({"error": "Validation failed", "details": exc.errors()}), 400
+
+        resume_chars = len(analyze_request.resume)
+        role = analyze_request.target_role
+        logger.info(
+            "analyze started ip=%s role=%r resume_chars=%d has_job_desc=%s",
+            client_ip,
+            role,
+            resume_chars,
+            bool(analyze_request.job_description),
+        )
+
+        try:
+            result = analyze_resume(analyze_request, app_config)
+        except anthropic.RateLimitError:
+            logger.error("analyze failed: anthropic rate limit ip=%s", client_ip)
+            return (
+                jsonify({"error": "AI service is busy. Please try again shortly."}),
+                503,
+            )
+        except anthropic.APIStatusError as exc:
+            if exc.status_code >= 500:
+                logger.error(
+                    "analyze failed: anthropic server error ip=%s status=%s",
+                    client_ip,
+                    exc.status_code,
+                )
+                return jsonify({"error": "AI service temporarily unavailable."}), 503
+            logger.error(
+                "analyze failed: anthropic client error ip=%s status=%s",
+                client_ip,
+                exc.status_code,
+            )
+            return jsonify({"error": "AI service request failed."}), 502
+        except anthropic.APITimeoutError:
+            logger.error("analyze failed: anthropic timeout ip=%s", client_ip)
+            return jsonify({"error": "AI service timed out. Please try again."}), 504
+        except anthropic.APIError as exc:
+            logger.error(
+                "analyze failed: anthropic api error ip=%s msg=%s", client_ip, exc
+            )
+            return jsonify({"error": "AI service error."}), 502
+        except json.JSONDecodeError:
+            logger.error("analyze failed: unparseable model json ip=%s", client_ip)
+            return (
+                jsonify(
+                    {
+                        "error": "AI returned malformed data",
+                        "code": "INVALID_MODEL_OUTPUT",
+                    }
+                ),
+                502,
+            )
+        except ValidationError:
+            logger.error(
+                "analyze failed: model output schema mismatch ip=%s", client_ip
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "AI returned malformed data",
+                        "code": "INVALID_MODEL_OUTPUT",
+                    }
+                ),
+                502,
+            )
+        except ValueError as exc:
+            logger.error("analyze failed: %s ip=%s", exc, client_ip)
+            return jsonify({"error": str(exc)}), 502
+
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "analyze completed ip=%s role=%r score=%s latency_ms=%.1f",
+            client_ip,
+            role,
+            result.get("score"),
+            elapsed_ms,
+        )
+        return jsonify(result), 200
+
+    return app
+
+
+# Gunicorn entrypoint (Docker / Render)
 try:
-    config = Config.from_env()
-    configure_logging(config.log_level)
+    load_dotenv()
+    application = create_app()
 except ValueError:
-    logger.warning("ANTHROPIC_API_KEY not set; UI will load but analysis is disabled.")
-
-_rate_limit_buckets: dict[str, list[float]] = {}
-
-
-def _parse_rate_limit_per_minute(rate_limit: str) -> int:
-    """Parse 'N per minute' into an integer N."""
-    match = re.match(r"^\s*(\d+)\s+per\s+minute\s*$", rate_limit, re.IGNORECASE)
-    if not match:
-        return 10
-    return int(match.group(1))
-
-
-def _check_rate_limit(client_ip: str) -> str | None:
-    """Return a user-facing error if the client exceeded the per-minute limit."""
-    if config is None:
-        return None
-
-    limit = _parse_rate_limit_per_minute(config.rate_limit_default)
-    now = time.time()
-    window_seconds = 60.0
-
-    timestamps = [
-        ts for ts in _rate_limit_buckets.get(client_ip, []) if now - ts < window_seconds
-    ]
-    if len(timestamps) >= limit:
-        _rate_limit_buckets[client_ip] = timestamps
-        return "Rate limit exceeded. Please wait a minute and try again."
-
-    timestamps.append(now)
-    _rate_limit_buckets[client_ip] = timestamps
-    return None
-
-
-def _format_validation_errors(exc: ValidationError) -> str:
-    """Turn pydantic validation errors into a readable message."""
-    messages: list[str] = []
-    for error in exc.errors():
-        loc = ".".join(str(part) for part in error.get("loc", ()))
-        msg = error.get("msg", "Invalid value")
-        if loc:
-            messages.append(f"{loc}: {msg}")
-        else:
-            messages.append(msg)
-    return "Validation failed: " + "; ".join(messages)
-
-
-def _format_result_as_markdown(result: dict[str, Any]) -> str:
-    """Render AnalyzeResponse fields as readable Markdown sections."""
-    lines = [f"## Score: {result['score']}/100", ""]
-
-    lines.append("## Strengths")
-    lines.extend(f"- {item}" for item in result.get("strengths", []))
-    lines.append("")
-
-    lines.append("## Weaknesses")
-    lines.extend(f"- {item}" for item in result.get("weaknesses", []))
-    lines.append("")
-
-    lines.append("## Missing keywords")
-    missing = result.get("missing_keywords", [])
-    if missing:
-        lines.extend(f"- {item}" for item in missing)
-    else:
-        lines.append("- None identified")
-    lines.append("")
-
-    lines.append("## Bullet rewrites")
-    for rewrite in result.get("bullet_rewrites", []):
-        lines.append(f"**Original:** {rewrite['original']}")
-        lines.append(f"**Improved:** {rewrite['improved']}")
-        lines.append("")
-    if not result.get("bullet_rewrites"):
-        lines.append("- No rewrites suggested")
-        lines.append("")
-
-    lines.append("## Next steps")
-    lines.extend(f"- {item}" for item in result.get("next_steps", []))
-
-    return "\n".join(lines).strip()
-
-
-def analyze_handler(
-    resume: str,
-    target_role: str,
-    job_description: str,
-    request: gr.Request,
-) -> str:
-    """Validate input, enforce rate limits, and return formatted analysis."""
-    client_ip = request.client.host if request.client else "unknown"
-
-    rate_error = _check_rate_limit(client_ip)
-    if rate_error:
-        return rate_error
-
-    if config is None:
-        return (
-            "ANTHROPIC_API_KEY is not configured. "
-            "Set it in Space secrets or your .env file."
-        )
-
-    try:
-        analyze_request = AnalyzeRequest.model_validate(
-            {
-                "resume": resume,
-                "target_role": target_role,
-                "job_description": job_description or None,
-            }
-        )
-    except ValidationError as exc:
-        return _format_validation_errors(exc)
-
-    try:
-        result = analyze_resume(analyze_request, config)
-        return _format_result_as_markdown(result)
-    except anthropic.RateLimitError:
-        return "AI service is busy. Please try again shortly."
-    except anthropic.APIStatusError as exc:
-        if exc.status_code >= 500:
-            return "AI service temporarily unavailable."
-        return "AI service request failed."
-    except anthropic.APITimeoutError:
-        return "AI service timed out. Please try again."
-    except anthropic.APIError:
-        return "AI service error."
-    except json.JSONDecodeError:
-        return "AI returned malformed data."
-    except ValidationError:
-        return "AI returned malformed data."
-    except ValueError as exc:
-        return str(exc)
-
-
-analyze_click = spaces.GPU()(analyze_handler)
-
-with gr.Blocks(title="Desk Review") as demo:
-    gr.Markdown(
-        "# Desk Review\n"
-        "Paste your resume and target role for structured AI feedback."
-    )
-    resume_input = gr.Textbox(
-        label="Resume",
-        lines=12,
-        placeholder="Paste your resume text here...",
-    )
-    target_role_input = gr.Textbox(
-        label="Target role",
-        lines=1,
-        placeholder="e.g. Software Engineer",
-    )
-    job_description_input = gr.Textbox(
-        label="Job description (optional)",
-        lines=6,
-        placeholder="Paste a job description for tighter matching...",
-    )
-    analyze_button = gr.Button("Analyze", variant="primary")
-    result_output = gr.Markdown(label="Results")
-
-    analyze_button.click(
-        analyze_click,
-        inputs=[resume_input, target_role_input, job_description_input],
-        outputs=result_output,
-    )
-
-
-@demo.app.get("/healthz")
-def healthz() -> dict[str, str]:
-    """Lightweight liveness probe for platform health checks."""
-    return {"status": "ok"}
+    application = None  # type: ignore[misc, assignment]
 
 
 if __name__ == "__main__":
-    demo.launch()
+    load_dotenv()
+    create_app().run(debug=False, host="0.0.0.0", port=5000)

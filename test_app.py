@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from app import analyze_handler
+from app import create_app
 from core import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -19,16 +18,6 @@ from core import (
 )
 
 SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
-
-
-@dataclass
-class FakeClient:
-    host: str
-
-
-@dataclass
-class FakeRequest:
-    client: FakeClient
 
 
 @pytest.fixture
@@ -54,7 +43,7 @@ def test_config() -> Config:
 
 @pytest.fixture
 def valid_analyze_payload() -> dict[str, str]:
-    """Minimal valid request payload for handler tests."""
+    """Minimal valid request payload for route tests."""
     return {
         "resume": (
             "Jane Doe\nSoftware Engineer\n\nEXPERIENCE\n"
@@ -167,35 +156,83 @@ def test_keywords_grounding_in_prompt(
     assert "Target role:" in user_content
 
 
-def test_analyze_handler_returns_formatted_markdown(
-    monkeypatch, test_config, valid_analyze_payload, valid_model_response
-):
-    """Gradio handler should return Markdown sections for a successful analysis."""
-    import app as gradio_app
+@pytest.fixture
+def client(test_config, valid_analyze_payload, valid_model_response):
+    """Flask test client with Anthropic mocked."""
+    app = create_app(test_config)
+    with patch("app.analyze_resume") as mock_analyze:
+        mock_analyze.return_value = valid_model_response
+        with app.test_client() as test_client:
+            yield test_client, mock_analyze, valid_analyze_payload
 
-    monkeypatch.setattr(gradio_app, "config", test_config)
-    gradio_app._rate_limit_buckets.clear()
 
-    with patch("app.analyze_resume", return_value=valid_model_response):
-        result = analyze_handler(
-            valid_analyze_payload["resume"],
-            valid_analyze_payload["target_role"],
-            valid_analyze_payload["job_description"],
-            FakeRequest(client=FakeClient(host="127.0.0.1")),
+def test_analyze_missing_fields_returns_400(client):
+    """POST without required fields should return 400."""
+    test_client, _, _ = client
+    response = test_client.post(
+        "/api/analyze",
+        data=json.dumps({"target_role": "Engineer"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Validation failed"
+
+
+def test_analyze_valid_input_returns_200(client):
+    """Valid payload should return 200 with structured feedback."""
+    test_client, mock_analyze, payload = client
+    response = test_client.post(
+        "/api/analyze",
+        data=json.dumps(payload),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.get_json()["score"] == 72
+    mock_analyze.assert_called_once()
+
+
+def test_analyze_malformed_model_output_returns_502(test_config, valid_analyze_payload):
+    """Route should surface 502 when model output fails schema validation."""
+    app = create_app(test_config)
+    with patch(
+        "app.analyze_resume",
+        side_effect=ValidationError.from_exception_data(
+            "AnalyzeResponse",
+            [
+                {
+                    "type": "greater_than_equal",
+                    "loc": ("score",),
+                    "input": 200,
+                    "ctx": {"ge": 0},
+                }
+            ],
+        ),
+    ):
+        with app.test_client() as test_client:
+            response = test_client.post(
+                "/api/analyze",
+                data=json.dumps(valid_analyze_payload),
+                content_type="application/json",
+            )
+    assert response.status_code == 502
+    assert response.get_json()["code"] == "INVALID_MODEL_OUTPUT"
+
+
+def test_analyze_rejects_non_json(test_config):
+    """Non-JSON requests should return 400."""
+    app = create_app(test_config)
+    with app.test_client() as test_client:
+        response = test_client.post(
+            "/api/analyze",
+            data="not json",
+            content_type="text/plain",
         )
-
-    assert "## Score: 72/100" in result
-    assert "## Strengths" in result
-    assert "## Weaknesses" in result
-    assert "## Missing keywords" in result
-    assert "## Bullet rewrites" in result
-    assert "## Next steps" in result
-    assert "Clear Python and Flask experience" in result
+    assert response.status_code == 400
 
 
 @pytest.fixture
 def strict_rate_limit_config() -> Config:
-    """Config with a tight rate limit for handler testing."""
+    """Config with a tight rate limit for 429 testing."""
     return Config(
         anthropic_api_key="test-key-not-real",
         anthropic_model="claude-sonnet-5",
@@ -214,32 +251,32 @@ def strict_rate_limit_config() -> Config:
     )
 
 
-def test_analyze_handler_rate_limit_message(
-    monkeypatch,
-    strict_rate_limit_config,
-    valid_analyze_payload,
-    valid_model_response,
+def test_healthz_returns_ok(test_config):
+    """Health check endpoint should return 200 without rendering the UI."""
+    app = create_app(test_config)
+    with app.test_client() as test_client:
+        response = test_client.get("/healthz")
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_analyze_rate_limit_returns_429(
+    strict_rate_limit_config, valid_analyze_payload, valid_model_response
 ):
-    """A second call from the same IP should return the rate-limit message."""
-    import app as gradio_app
-
-    monkeypatch.setattr(gradio_app, "config", strict_rate_limit_config)
-    gradio_app._rate_limit_buckets.clear()
-    request = FakeRequest(client=FakeClient(host="10.0.0.99"))
-
+    """Second request within the window should return 429."""
+    app = create_app(strict_rate_limit_config)
+    payload = json.dumps(valid_analyze_payload)
     with patch("app.analyze_resume", return_value=valid_model_response):
-        first = analyze_handler(
-            valid_analyze_payload["resume"],
-            valid_analyze_payload["target_role"],
-            valid_analyze_payload["job_description"],
-            request,
-        )
-        second = analyze_handler(
-            valid_analyze_payload["resume"],
-            valid_analyze_payload["target_role"],
-            valid_analyze_payload["job_description"],
-            request,
-        )
-
-    assert "## Score: 72/100" in first
-    assert "Rate limit exceeded" in second
+        with app.test_client() as test_client:
+            first = test_client.post(
+                "/api/analyze",
+                data=payload,
+                content_type="application/json",
+            )
+            second = test_client.post(
+                "/api/analyze",
+                data=payload,
+                content_type="application/json",
+            )
+    assert first.status_code == 200
+    assert second.status_code == 429

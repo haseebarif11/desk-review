@@ -1,0 +1,11 @@
+services:
+  web:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      - PORT=7860
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
