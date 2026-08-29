@@ -54,7 +54,7 @@ class Config:
         return cls(
             gemini_api_key=api_key,
             gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            max_tokens=int(os.environ.get("ANTHROPIC_MAX_TOKENS", "2048")),
+            max_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "2048")),
             api_timeout_seconds=float(os.environ.get("API_TIMEOUT_SECONDS", "60")),
             api_max_retries=int(os.environ.get("API_MAX_RETRIES", "3")),
             api_retry_base_delay_seconds=float(
