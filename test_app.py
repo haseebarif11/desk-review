@@ -24,8 +24,8 @@ SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
 def test_config() -> Config:
     """Config for unit tests (no real API key needed)."""
     return Config(
-        anthropic_api_key="test-key-not-real",
-        anthropic_model="claude-sonnet-5",
+        gemini_api_key="test-key-not-real",
+        gemini_model="gemini-2.5-flash",
         max_tokens=1024,
         api_timeout_seconds=5.0,
         api_max_retries=2,
@@ -89,14 +89,15 @@ def valid_model_response() -> dict:
     }
 
 
-def _mock_client(response_dict: dict) -> MagicMock:
-    """Build a mock Anthropic client returning JSON text."""
+def _mock_client(
+    response_dict: dict, *, parsed: AnalyzeResponse | None = None
+) -> MagicMock:
+    """Build a mock Gemini client returning structured output."""
     client = MagicMock()
-    block = MagicMock()
-    block.text = json.dumps(response_dict)
-    message = MagicMock()
-    message.content = [block]
-    client.messages.create.return_value = message
+    response = MagicMock()
+    response.parsed = parsed
+    response.text = json.dumps(response_dict)
+    client.models.generate_content.return_value = response
     return client
 
 
@@ -105,7 +106,8 @@ def test_analyze_resume_returns_valid_schema(
 ):
     """Mocked analysis returns all required keys with score in range."""
     request = AnalyzeRequest.model_validate(valid_analyze_payload)
-    client = _mock_client(valid_model_response)
+    parsed = AnalyzeResponse.model_validate(valid_model_response)
+    client = _mock_client(valid_model_response, parsed=parsed)
 
     result = analyze_resume(request, config=test_config, client=client)
 
@@ -129,6 +131,7 @@ def test_analyze_resume_rejects_malformed_model_output(
 
 def test_analyze_resume_sample_files(test_config, valid_model_response):
     """Each sample resume file can be parsed and analyzed with a mock."""
+    parsed = AnalyzeResponse.model_validate(valid_model_response)
     for sample_path in SAMPLES_DIR.glob("*.txt"):
         request = AnalyzeRequest(
             resume=sample_path.read_text(encoding="utf-8"),
@@ -137,7 +140,7 @@ def test_analyze_resume_sample_files(test_config, valid_model_response):
         result = analyze_resume(
             request,
             config=test_config,
-            client=_mock_client(valid_model_response),
+            client=_mock_client(valid_model_response, parsed=parsed),
         )
         assert 0 <= result["score"] <= 100
 
@@ -145,20 +148,21 @@ def test_analyze_resume_sample_files(test_config, valid_model_response):
 def test_keywords_grounding_in_prompt(
     test_config, valid_analyze_payload, valid_model_response
 ):
-    """The Anthropic call should include role keywords from keywords.py."""
+    """The Gemini call should include role keywords from keywords.py."""
     request = AnalyzeRequest.model_validate(valid_analyze_payload)
-    client = _mock_client(valid_model_response)
+    parsed = AnalyzeResponse.model_validate(valid_model_response)
+    client = _mock_client(valid_model_response, parsed=parsed)
 
     analyze_resume(request, config=test_config, client=client)
 
-    user_content = client.messages.create.call_args.kwargs["messages"][0]["content"]
-    assert "python" in user_content.lower()
-    assert "Target role:" in user_content
+    prompt = client.models.generate_content.call_args.kwargs["contents"]
+    assert "python" in prompt.lower()
+    assert "Target role:" in prompt
 
 
 @pytest.fixture
 def client(test_config, valid_analyze_payload, valid_model_response):
-    """Flask test client with Anthropic mocked."""
+    """Flask test client with analyze_resume mocked."""
     app = create_app(test_config)
     with patch("app.analyze_resume") as mock_analyze:
         mock_analyze.return_value = valid_model_response
@@ -234,8 +238,8 @@ def test_analyze_rejects_non_json(test_config):
 def strict_rate_limit_config() -> Config:
     """Config with a tight rate limit for 429 testing."""
     return Config(
-        anthropic_api_key="test-key-not-real",
-        anthropic_model="claude-sonnet-5",
+        gemini_api_key="test-key-not-real",
+        gemini_model="gemini-2.5-flash",
         max_tokens=1024,
         api_timeout_seconds=5.0,
         api_max_retries=2,

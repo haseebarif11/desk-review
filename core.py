@@ -10,7 +10,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import anthropic
+import httpx
+from google import genai
+from google.genai import errors as genai_errors
 from pydantic import BaseModel, Field, field_validator
 
 from keywords import get_keywords_for_role
@@ -27,8 +29,8 @@ logger = logging.getLogger(__name__)
 class Config:
     """Central configuration loaded from environment variables."""
 
-    anthropic_api_key: str
-    anthropic_model: str
+    gemini_api_key: str
+    gemini_model: str
     max_tokens: int
     api_timeout_seconds: float
     api_max_retries: int
@@ -45,13 +47,13 @@ class Config:
     @classmethod
     def from_env(cls) -> Config:
         """Build configuration from environment variables with sensible defaults."""
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+            raise ValueError("GEMINI_API_KEY environment variable is required")
 
         return cls(
-            anthropic_api_key=api_key,
-            anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            gemini_api_key=api_key,
+            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
             max_tokens=int(os.environ.get("ANTHROPIC_MAX_TOKENS", "2048")),
             api_timeout_seconds=float(os.environ.get("API_TIMEOUT_SECONDS", "60")),
             api_max_retries=int(os.environ.get("API_MAX_RETRIES", "3")),
@@ -216,77 +218,92 @@ def _extract_json_text(raw_text: str) -> str:
     return text
 
 
-def _call_anthropic_with_retry(
-    client: anthropic.Anthropic,
+def _parse_generate_content_response(response: Any) -> AnalyzeResponse:
+    """Read structured output from a Gemini generate_content response."""
+    if response.parsed is not None:
+        if isinstance(response.parsed, AnalyzeResponse):
+            return response.parsed
+        return AnalyzeResponse.model_validate(response.parsed)
+
+    if not response.text:
+        raise ValueError("Empty response from AI service")
+
+    parsed = json.loads(_extract_json_text(response.text))
+    return AnalyzeResponse.model_validate(parsed)
+
+
+def _call_gemini_with_retry(
+    client: genai.Client,
     config: Config,
-    user_prompt: str,
-) -> str:
-    """Call Anthropic with timeout and exponential backoff on retryable errors."""
+    prompt: str,
+) -> AnalyzeResponse:
+    """Call Gemini with timeout and exponential backoff on retryable errors."""
     last_error: Exception | None = None
 
     for attempt in range(config.api_max_retries):
         try:
-            response = client.messages.create(
-                model=config.anthropic_model,
-                max_tokens=config.max_tokens,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                timeout=config.api_timeout_seconds,
+            response = client.models.generate_content(
+                model=config.gemini_model,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": AnalyzeResponse,
+                    "max_output_tokens": config.max_tokens,
+                },
             )
-            if not response.content:
-                raise ValueError("Empty response from AI service")
-            return response.content[0].text
-        except (anthropic.RateLimitError, anthropic.APITimeoutError) as exc:
+            return _parse_generate_content_response(response)
+        except genai_errors.ServerError as exc:
             last_error = exc
             if attempt < config.api_max_retries - 1:
                 delay = config.api_retry_base_delay_seconds * (2**attempt)
                 logger.warning(
-                    "anthropic retryable error attempt=%d delay=%.1fs type=%s",
+                    "gemini 5xx attempt=%d code=%d delay=%.1fs",
                     attempt + 1,
+                    exc.code,
                     delay,
-                    type(exc).__name__,
                 )
                 time.sleep(delay)
                 continue
             raise
-        except anthropic.APIStatusError as exc:
-            if exc.status_code >= 500 and attempt < config.api_max_retries - 1:
-                last_error = exc
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            if attempt < config.api_max_retries - 1:
                 delay = config.api_retry_base_delay_seconds * (2**attempt)
                 logger.warning(
-                    "anthropic 5xx attempt=%d status=%d delay=%.1fs",
+                    "gemini timeout attempt=%d delay=%.1fs",
                     attempt + 1,
-                    exc.status_code,
                     delay,
                 )
                 time.sleep(delay)
                 continue
+            raise
+        except genai_errors.ClientError:
+            # 4xx errors (including 429 rate limits) are not retried.
             raise
 
     if last_error:
         raise last_error
-    raise RuntimeError("Anthropic call failed without a captured error")
+    raise RuntimeError("Gemini call failed without a captured error")
 
 
 def analyze_resume(
     analyze_request: AnalyzeRequest,
     config: Config | None = None,
-    client: anthropic.Anthropic | None = None,
+    client: genai.Client | None = None,
 ) -> dict[str, Any]:
     """
-    Run resume analysis via Anthropic and validate structured output.
+    Run resume analysis via Google Gemini and validate structured output.
 
-    The API key is only used server-side via the Anthropic client and is never
+    The API key is only used server-side via the Gemini client and is never
     logged or returned to callers.
     """
     app_config = config or Config.from_env()
-    anthropic_client = client or anthropic.Anthropic(
-        api_key=app_config.anthropic_api_key
+    gemini_client = client or genai.Client(
+        api_key=app_config.gemini_api_key,
+        http_options={
+            "timeout": int(app_config.api_timeout_seconds * 1000),
+        },
     )
-    user_prompt = _build_user_prompt(analyze_request)
-
-    raw_text = _call_anthropic_with_retry(anthropic_client, app_config, user_prompt)
-    json_text = _extract_json_text(raw_text)
-    parsed = json.loads(json_text)
-    validated = AnalyzeResponse.model_validate(parsed)
+    prompt = f"{SYSTEM_PROMPT}\n\n{_build_user_prompt(analyze_request)}"
+    validated = _call_gemini_with_retry(gemini_client, app_config, prompt)
     return validated.to_api_dict()

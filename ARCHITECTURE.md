@@ -11,7 +11,7 @@ sequenceDiagram
     participant Flask
     participant Core
     participant Keywords
-    participant Anthropic
+    participant Gemini
 
     User->>Frontend: Paste resume + target role
     Frontend->>Frontend: Client-side validation
@@ -21,8 +21,8 @@ sequenceDiagram
     Flask->>Core: analyze_resume(...)
     Core->>Keywords: get_keywords_for_role(role)
     Keywords-->>Core: Curated keyword list
-    Core->>Anthropic: Prompt with resume + keywords
-    Anthropic-->>Core: JSON feedback
+    Core->>Gemini: Prompt with resume + keywords
+    Gemini-->>Core: JSON feedback
     Core->>Core: Parse + schema validate output
     Core-->>Flask: Structured dict
     Flask-->>Frontend: 200 + structured JSON
@@ -45,7 +45,7 @@ Responsibilities: validation, rate limiting, logging (metadata only, no PII), ca
 
 ### Analysis core (`core.py`)
 
-Config, Pydantic schemas, Anthropic client with retries, and `analyze_resume` — shared business logic with no web-framework imports.
+Config, Pydantic schemas, Gemini client with retries, and `analyze_resume` — shared business logic with no web-framework imports.
 
 ### Keyword retrieval (`keywords.py`)
 
@@ -68,12 +68,12 @@ This is intentionally lightweight retrieval — not RAG over documents:
 | 400 | Invalid JSON or failed input validation |
 | 429 | Rate limit exceeded (Flask-Limiter) |
 | 502 | Unparseable or schema-invalid AI output |
-| 503 | Anthropic rate limit or 5xx after retries |
-| 504 | Anthropic timeout |
+| 503 | Gemini rate limit or 5xx after retries |
+| 504 | Gemini timeout |
 
 ## Security model
 
-- `ANTHROPIC_API_KEY` is read only on the server — never logged or sent to the frontend
+- `GEMINI_API_KEY` is read only on the server — never logged or sent to the frontend
 - CORS is opt-in via `CORS_ORIGINS` for split frontend/backend hosting
 
 ## Interview talking points

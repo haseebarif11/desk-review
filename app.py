@@ -7,12 +7,13 @@ import logging
 import time
 from typing import Any
 
-import anthropic
+import httpx
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
 from core import AnalyzeRequest, Config, analyze_resume, configure_logging
@@ -90,32 +91,32 @@ def create_app(config: Config | None = None) -> Flask:
 
         try:
             result = analyze_resume(analyze_request, app_config)
-        except anthropic.RateLimitError:
-            logger.error("analyze failed: anthropic rate limit ip=%s", client_ip)
-            return (
-                jsonify({"error": "AI service is busy. Please try again shortly."}),
-                503,
-            )
-        except anthropic.APIStatusError as exc:
-            if exc.status_code >= 500:
-                logger.error(
-                    "analyze failed: anthropic server error ip=%s status=%s",
-                    client_ip,
-                    exc.status_code,
+        except genai_errors.ClientError as exc:
+            if exc.code == 429:
+                logger.error("analyze failed: gemini rate limit ip=%s", client_ip)
+                return (
+                    jsonify({"error": "AI service is busy. Please try again shortly."}),
+                    503,
                 )
-                return jsonify({"error": "AI service temporarily unavailable."}), 503
             logger.error(
-                "analyze failed: anthropic client error ip=%s status=%s",
+                "analyze failed: gemini client error ip=%s code=%s",
                 client_ip,
-                exc.status_code,
+                exc.code,
             )
             return jsonify({"error": "AI service request failed."}), 502
-        except anthropic.APITimeoutError:
-            logger.error("analyze failed: anthropic timeout ip=%s", client_ip)
-            return jsonify({"error": "AI service timed out. Please try again."}), 504
-        except anthropic.APIError as exc:
+        except genai_errors.ServerError as exc:
             logger.error(
-                "analyze failed: anthropic api error ip=%s msg=%s", client_ip, exc
+                "analyze failed: gemini server error ip=%s code=%s",
+                client_ip,
+                exc.code,
+            )
+            return jsonify({"error": "AI service temporarily unavailable."}), 503
+        except httpx.TimeoutException:
+            logger.error("analyze failed: gemini timeout ip=%s", client_ip)
+            return jsonify({"error": "AI service timed out. Please try again."}), 504
+        except genai_errors.APIError as exc:
+            logger.error(
+                "analyze failed: gemini api error ip=%s msg=%s", client_ip, exc
             )
             return jsonify({"error": "AI service error."}), 502
         except json.JSONDecodeError:
