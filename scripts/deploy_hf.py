@@ -111,7 +111,16 @@ def main() -> int:
                 value="3 per minute",
                 token=token,
             )
-            print("Configured GEMINI_API_KEY secret and RATE_LIMIT_DEFAULT variable.")
+            api.add_space_variable(
+                repo_id=SPACE_ID,
+                key="GEMINI_MODEL",
+                value=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+                token=token,
+            )
+            print(
+                "Configured GEMINI_API_KEY secret, GEMINI_MODEL, "
+                "and RATE_LIMIT_DEFAULT variables."
+            )
 
     print(f"Deployed: https://huggingface.co/spaces/{SPACE_ID}")
     print("Next: Space Settings -> Hardware -> CPU basic (API-only; no GPU needed).")

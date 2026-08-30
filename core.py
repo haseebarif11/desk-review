@@ -69,7 +69,7 @@ class Config:
 
         return cls(
             gemini_api_key=api_key,
-            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
             max_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "2048")),
             api_timeout_seconds=float(os.environ.get("API_TIMEOUT_SECONDS", "60")),
             api_max_retries=int(os.environ.get("API_MAX_RETRIES", "3")),
@@ -199,6 +199,37 @@ SYSTEM_PROMPT = (
     "- Output JSON only. No preamble or explanation."
 )
 
+# Flat OpenAPI schema for Gemini REST (Pydantic's $defs/$ref are rejected).
+GEMINI_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "weaknesses": {"type": "array", "items": {"type": "string"}},
+        "missing_keywords": {"type": "array", "items": {"type": "string"}},
+        "bullet_rewrites": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "original": {"type": "string"},
+                    "improved": {"type": "string"},
+                },
+                "required": ["original", "improved"],
+            },
+        },
+        "next_steps": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "score",
+        "strengths",
+        "weaknesses",
+        "missing_keywords",
+        "bullet_rewrites",
+        "next_steps",
+    ],
+}
+
 
 def configure_logging(level: str) -> None:
     """Configure structured application logging."""
@@ -262,7 +293,7 @@ def _call_gemini_with_retry(
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": AnalyzeResponse.model_json_schema(),
+            "responseSchema": GEMINI_RESPONSE_SCHEMA,
             "maxOutputTokens": config.max_tokens,
         },
     }

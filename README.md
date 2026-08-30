@@ -43,7 +43,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for request flow, design decisions, and i
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | *(required)* | Server-side API key from [Google AI Studio](https://aistudio.google.com/apikey) |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Model ID |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Model ID |
 | `RATE_LIMIT_DEFAULT` | `10 per minute` | Per-session limit (`3 per minute` recommended for a public HF Space) |
 
 See `.env.example` for all options.
