@@ -7,41 +7,35 @@ Short reference for how the app works and why it is built this way.
 ```mermaid
 sequenceDiagram
     participant User
-    participant Frontend
-    participant Flask
+    participant Gradio
     participant Core
     participant Keywords
     participant Gemini
 
-    User->>Frontend: Paste resume + target role
-    Frontend->>Frontend: Client-side validation
-    Frontend->>Flask: POST /api/analyze (JSON)
-    Flask->>Flask: Pydantic input validation
-    Flask->>Flask: Rate limit check
-    Flask->>Core: analyze_resume(...)
+    User->>Gradio: Paste resume + target role
+    Gradio->>Gradio: Pydantic input validation
+    Gradio->>Gradio: Per-session rate limit check
+    Gradio->>Core: analyze_resume(...)
     Core->>Keywords: get_keywords_for_role(role)
     Keywords-->>Core: Curated keyword list
     Core->>Gemini: Prompt with resume + keywords
     Gemini-->>Core: JSON feedback
     Core->>Core: Parse + schema validate output
-    Core-->>Flask: Structured dict
-    Flask-->>Frontend: 200 + structured JSON
-    Frontend->>User: Render score, lists, rewrites
+    Core-->>Gradio: Structured dict
+    Gradio->>User: Render Markdown feedback
 ```
 
 ## Components
 
-### Frontend (`templates/`, `static/`)
+### Gradio UI (`app.py`)
 
-Single-page form. Validates input before submit, shows inline errors, disables the button with a spinner during the API call, and handles network errors plus malformed server responses (HTTP 502 with `INVALID_MODEL_OUTPUT`).
+- Gradio Blocks form for resume, target role, and optional job description
+- `GET /healthz` — liveness probe on Gradio's underlying FastAPI app
+- In-memory per-session rate limiting keyed by Gradio's `session_hash`
 
-### Flask API (`app.py`)
+Responsibilities: validation, rate limiting, calling `core.analyze_resume`, and rendering results as Markdown.
 
-- `POST /api/analyze` — main endpoint
-- `GET /` — serves the UI
-- `GET /healthz` — liveness probe for Render health checks (`@limiter.exempt`)
-
-Responsibilities: validation, rate limiting, logging (metadata only, no PII), calling `core.analyze_resume`, and mapping errors to HTTP status codes.
+**ZeroGPU note:** The Space can run on Hugging Face ZeroGPU hardware, but `analyze_handler` is **not** wrapped in `@spaces.GPU()`. Analysis is a remote Gemini API call with no local GPU work; decorating it would burn the free daily ZeroGPU quota (~3.5–5 min/day) for nothing.
 
 ### Analysis core (`core.py`)
 
@@ -63,21 +57,20 @@ This is intentionally lightweight retrieval — not RAG over documents:
 
 ## Error handling
 
-| Status | When |
-|--------|------|
-| 400 | Invalid JSON or failed input validation |
-| 429 | Rate limit exceeded (Flask-Limiter) |
-| 502 | Unparseable or schema-invalid AI output |
-| 503 | Gemini rate limit or 5xx after retries |
-| 504 | Gemini timeout |
+| User-facing message | When |
+|-------|------|
+| Validation failed | Invalid input (Pydantic) |
+| Rate limit exceeded | Per-session limit in Gradio handler |
+| AI returned malformed data | Unparseable or schema-invalid AI output |
+| AI service is busy / unavailable / timed out | Gemini API errors |
 
 ## Security model
 
-- `GEMINI_API_KEY` is read only on the server — never logged or sent to the frontend
-- CORS is opt-in via `CORS_ORIGINS` for split frontend/backend hosting
+- `GEMINI_API_KEY` is read only on the server — never logged or sent to the browser
 
 ## Interview talking points
 
-1. **Defense in depth:** validate on client (UX), server (security), and again on AI output (reliability).
+1. **Defense in depth:** validate on input (Pydantic), enforce rate limits, and validate AI output again before display.
 2. **Retrieval without over-engineering:** `keywords.py` shows grounding without jumping to a vector DB on day one.
 3. **Operational hygiene:** rate limits, retries, timeouts, and no PII in logs.
+4. **Right-sized infrastructure:** Gradio on HF Spaces for a free public demo; no `@spaces.GPU()` on API-only handlers.
