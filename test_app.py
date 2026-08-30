@@ -183,7 +183,7 @@ def test_keywords_grounding_in_prompt(
 def test_analyze_handler_returns_formatted_markdown(
     monkeypatch, test_config, valid_analyze_payload, valid_model_response
 ):
-    """Gradio handler should return Markdown sections for a successful analysis."""
+    """Gradio handler should return readable HTML sections for a successful analysis."""
     import app as gradio_app
 
     monkeypatch.setattr(gradio_app, "config", test_config)
@@ -197,12 +197,12 @@ def test_analyze_handler_returns_formatted_markdown(
             FakeRequest(client=FakeClient(host="127.0.0.1")),
         )
 
-    assert "## Score: 72/100" in result
-    assert "## Strengths" in result
-    assert "## Weaknesses" in result
-    assert "## Missing keywords" in result
-    assert "## Bullet rewrites" in result
-    assert "## Next steps" in result
+    assert "Score: 72/100" in result
+    assert "<h3>Strengths</h3>" in result
+    assert "<h3>Weaknesses</h3>" in result
+    assert "<h3>Missing keywords</h3>" in result
+    assert "<h3>Bullet rewrites</h3>" in result
+    assert "<h3>Next steps</h3>" in result
     assert "Clear Python and Flask experience" in result
 
 
@@ -254,5 +254,5 @@ def test_analyze_handler_rate_limit_message(
             request,
         )
 
-    assert "## Score: 72/100" in first
+    assert "Score: 72/100" in first
     assert "Rate limit exceeded" in second

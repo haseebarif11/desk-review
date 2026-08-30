@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -94,6 +95,58 @@ def _format_validation_errors(exc: ValidationError) -> str:
     return "Validation failed: " + "; ".join(messages)
 
 
+def _format_result_as_html(result: dict[str, Any]) -> str:
+    """Render analysis as readable HTML with explicit contrast and spacing."""
+    score = html.escape(str(result["score"]))
+
+    def items_block(title: str, items: list[str], *, empty: str | None = None) -> str:
+        if items:
+            rows = "".join(
+                f"<li>{html.escape(str(item))}</li>" for item in items
+            )
+            body = f"<ul>{rows}</ul>"
+        elif empty:
+            body = f"<p class='muted'>{html.escape(empty)}</p>"
+        else:
+            body = ""
+        return f"<section><h3>{html.escape(title)}</h3>{body}</section>"
+
+    rewrites = result.get("bullet_rewrites", [])
+    if rewrites:
+        rewrite_blocks = []
+        for rewrite in rewrites:
+            original = html.escape(str(rewrite["original"]))
+            improved = html.escape(str(rewrite["improved"]))
+            rewrite_blocks.append(
+                "<div class='rewrite'>"
+                f"<p><strong>Original:</strong> {original}</p>"
+                f"<p><strong>Improved:</strong> {improved}</p>"
+                "</div>"
+            )
+        rewrites_html = "".join(rewrite_blocks)
+    else:
+        rewrites_html = "<p class='muted'>No rewrites suggested.</p>"
+
+    sections = [
+        items_block("Strengths", result.get("strengths", [])),
+        items_block("Weaknesses", result.get("weaknesses", [])),
+        items_block(
+            "Missing keywords",
+            result.get("missing_keywords", []),
+            empty="None identified",
+        ),
+        f"<section><h3>Bullet rewrites</h3>{rewrites_html}</section>",
+        items_block("Next steps", result.get("next_steps", [])),
+    ]
+
+    return (
+        "<div class='desk-review-results'>"
+        f"<div class='score'>Score: {score}/100</div>"
+        + "".join(sections)
+        + "</div>"
+    )
+
+
 def _format_result_as_markdown(result: dict[str, Any]) -> str:
     """Render AnalyzeResponse fields as readable Markdown sections."""
     lines = [f"## Score: {result['score']}/100", ""]
@@ -167,7 +220,7 @@ def analyze_handler(
 
     try:
         result = analyze_resume(analyze_request, config)
-        return _format_result_as_markdown(result)
+        return _format_result_as_html(result)
     except GeminiClientError as exc:
         if exc.code == 429:
             return "AI service is busy. Please try again shortly."
@@ -186,7 +239,60 @@ def analyze_handler(
         return str(exc)
 
 
-with gr.Blocks(title="Desk Review") as demo:
+RESULTS_CSS = """
+.desk-review-results {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: #111827 !important;
+    background: #ffffff !important;
+    padding: 1.25rem 1.5rem;
+    border: 1px solid #d1d5db;
+    border-radius: 12px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.desk-review-results .score {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #1d4ed8 !important;
+    margin-bottom: 1rem;
+}
+.desk-review-results section {
+    margin-top: 1.25rem;
+}
+.desk-review-results h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #111827 !important;
+    margin: 0 0 0.5rem 0;
+}
+.desk-review-results ul {
+    margin: 0;
+    padding-left: 1.25rem;
+}
+.desk-review-results li {
+    margin-bottom: 0.4rem;
+    color: #1f2937 !important;
+}
+.desk-review-results p,
+.desk-review-results strong {
+    color: #1f2937 !important;
+}
+.desk-review-results .rewrite {
+    background: #f3f4f6;
+    border-left: 4px solid #3b82f6;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    border-radius: 0 8px 8px 0;
+}
+.desk-review-results .muted {
+    color: #6b7280 !important;
+    margin: 0;
+}
+"""
+
+with gr.Blocks(title="Desk Review", css=RESULTS_CSS) as demo:
     gr.Markdown(
         "# Desk Review\n"
         "Paste your resume and target role for structured AI feedback."
@@ -207,7 +313,7 @@ with gr.Blocks(title="Desk Review") as demo:
         placeholder="Paste a job description for tighter matching...",
     )
     analyze_button = gr.Button("Analyze", variant="primary")
-    result_output = gr.Markdown(label="Results")
+    result_output = gr.HTML(label="Results")
 
     analyze_button.click(
         analyze_handler,
