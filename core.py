@@ -11,13 +11,29 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from google import genai
-from google.genai import errors as genai_errors
 from pydantic import BaseModel, Field, field_validator
 
 from keywords import get_keywords_for_role
 
 logger = logging.getLogger(__name__)
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+class GeminiAPIError(Exception):
+    """Base error for Gemini HTTP API failures."""
+
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+class GeminiClientError(GeminiAPIError):
+    """Non-retryable Gemini client error (4xx)."""
+
+
+class GeminiServerError(GeminiAPIError):
+    """Retryable Gemini server error (5xx)."""
 
 
 # ---------------------------------------------------------------------------
@@ -218,68 +234,89 @@ def _extract_json_text(raw_text: str) -> str:
     return text
 
 
-def _parse_generate_content_response(response: Any) -> AnalyzeResponse:
-    """Read structured output from a Gemini generate_content response."""
-    if response.parsed is not None:
-        if isinstance(response.parsed, AnalyzeResponse):
-            return response.parsed
-        return AnalyzeResponse.model_validate(response.parsed)
-
-    if not response.text:
+def _parse_generate_content_response(payload: dict[str, Any]) -> AnalyzeResponse:
+    """Read structured output from a Gemini generateContent response."""
+    candidates = payload.get("candidates") or []
+    if not candidates:
         raise ValueError("Empty response from AI service")
 
-    parsed = json.loads(_extract_json_text(response.text))
+    parts = candidates[0].get("content", {}).get("parts") or []
+    text_parts = [part.get("text", "") for part in parts if part.get("text")]
+    if not text_parts:
+        raise ValueError("Empty response from AI service")
+
+    parsed = json.loads(_extract_json_text("".join(text_parts)))
     return AnalyzeResponse.model_validate(parsed)
 
 
 def _call_gemini_with_retry(
-    client: genai.Client,
     config: Config,
     prompt: str,
+    http_client: httpx.Client | None = None,
 ) -> AnalyzeResponse:
     """Call Gemini with timeout and exponential backoff on retryable errors."""
+    client = http_client or httpx.Client(timeout=config.api_timeout_seconds)
+    owns_client = http_client is None
+    url = f"{GEMINI_API_BASE}/models/{config.gemini_model}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": AnalyzeResponse.model_json_schema(),
+            "maxOutputTokens": config.max_tokens,
+        },
+    }
     last_error: Exception | None = None
 
-    for attempt in range(config.api_max_retries):
-        try:
-            response = client.models.generate_content(
-                model=config.gemini_model,
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": AnalyzeResponse,
-                    "max_output_tokens": config.max_tokens,
-                },
-            )
-            return _parse_generate_content_response(response)
-        except genai_errors.ServerError as exc:
-            last_error = exc
-            if attempt < config.api_max_retries - 1:
-                delay = config.api_retry_base_delay_seconds * (2**attempt)
-                logger.warning(
-                    "gemini 5xx attempt=%d code=%d delay=%.1fs",
-                    attempt + 1,
-                    exc.code,
-                    delay,
+    try:
+        for attempt in range(config.api_max_retries):
+            try:
+                response = client.post(
+                    url,
+                    params={"key": config.gemini_api_key},
+                    json=payload,
                 )
-                time.sleep(delay)
-                continue
-            raise
-        except httpx.TimeoutException as exc:
-            last_error = exc
-            if attempt < config.api_max_retries - 1:
-                delay = config.api_retry_base_delay_seconds * (2**attempt)
-                logger.warning(
-                    "gemini timeout attempt=%d delay=%.1fs",
-                    attempt + 1,
-                    delay,
-                )
-                time.sleep(delay)
-                continue
-            raise
-        except genai_errors.ClientError:
-            # 4xx errors (including 429 rate limits) are not retried.
-            raise
+                if response.status_code >= 500:
+                    raise GeminiServerError(
+                        response.status_code,
+                        response.text or "Gemini server error",
+                    )
+                if response.status_code >= 400:
+                    raise GeminiClientError(
+                        response.status_code,
+                        response.text or "Gemini client error",
+                    )
+                return _parse_generate_content_response(response.json())
+            except GeminiServerError as exc:
+                last_error = exc
+                if attempt < config.api_max_retries - 1:
+                    delay = config.api_retry_base_delay_seconds * (2**attempt)
+                    logger.warning(
+                        "gemini 5xx attempt=%d code=%d delay=%.1fs",
+                        attempt + 1,
+                        exc.code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                if attempt < config.api_max_retries - 1:
+                    delay = config.api_retry_base_delay_seconds * (2**attempt)
+                    logger.warning(
+                        "gemini timeout attempt=%d delay=%.1fs",
+                        attempt + 1,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+            except GeminiClientError:
+                raise
+    finally:
+        if owns_client:
+            client.close()
 
     if last_error:
         raise last_error
@@ -289,7 +326,7 @@ def _call_gemini_with_retry(
 def analyze_resume(
     analyze_request: AnalyzeRequest,
     config: Config | None = None,
-    client: genai.Client | None = None,
+    http_client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """
     Run resume analysis via Google Gemini and validate structured output.
@@ -298,12 +335,6 @@ def analyze_resume(
     logged or returned to callers.
     """
     app_config = config or Config.from_env()
-    gemini_client = client or genai.Client(
-        api_key=app_config.gemini_api_key,
-        http_options={
-            "timeout": int(app_config.api_timeout_seconds * 1000),
-        },
-    )
     prompt = f"{SYSTEM_PROMPT}\n\n{_build_user_prompt(analyze_request)}"
-    validated = _call_gemini_with_retry(gemini_client, app_config, prompt)
+    validated = _call_gemini_with_retry(app_config, prompt, http_client=http_client)
     return validated.to_api_dict()

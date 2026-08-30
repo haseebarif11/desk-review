@@ -114,9 +114,7 @@ def main() -> int:
             print("Configured GEMINI_API_KEY secret and RATE_LIMIT_DEFAULT variable.")
 
     print(f"Deployed: https://huggingface.co/spaces/{SPACE_ID}")
-    print(
-        "Next: Space Settings → Hardware → CPU basic (API-only; no GPU needed)."
-    )
+    print("Next: Space Settings -> Hardware -> CPU basic (API-only; no GPU needed).")
     return 0
 
 

@@ -101,15 +101,25 @@ def valid_model_response() -> dict:
     }
 
 
-def _mock_client(
-    response_dict: dict, *, parsed: AnalyzeResponse | None = None
+def _mock_http_client(
+    response_dict: dict, *, status_code: int = 200
 ) -> MagicMock:
-    """Build a mock Gemini client returning structured output."""
+    """Build a mock httpx client returning a Gemini REST payload."""
     client = MagicMock()
     response = MagicMock()
-    response.parsed = parsed
+    response.status_code = status_code
     response.text = json.dumps(response_dict)
-    client.models.generate_content.return_value = response
+    response.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": json.dumps(response_dict)}],
+                }
+            }
+        ]
+    }
+    client.post.return_value = response
+    client.close = MagicMock()
     return client
 
 
@@ -118,10 +128,9 @@ def test_analyze_resume_returns_valid_schema(
 ):
     """Mocked analysis returns all required keys with score in range."""
     request = AnalyzeRequest.model_validate(valid_analyze_payload)
-    parsed = AnalyzeResponse.model_validate(valid_model_response)
-    client = _mock_client(valid_model_response, parsed=parsed)
+    client = _mock_http_client(valid_model_response)
 
-    result = analyze_resume(request, config=test_config, client=client)
+    result = analyze_resume(request, config=test_config, http_client=client)
 
     validated = AnalyzeResponse.model_validate(result)
     assert 0 <= validated.score <= 100
@@ -135,10 +144,10 @@ def test_analyze_resume_rejects_malformed_model_output(
 ):
     """Malformed AI JSON should raise ValidationError."""
     request = AnalyzeRequest.model_validate(valid_analyze_payload)
-    client = _mock_client({"score": 150, "strengths": []})
+    client = _mock_http_client({"score": 150, "strengths": []})
 
     with pytest.raises(ValidationError):
-        analyze_resume(request, config=test_config, client=client)
+        analyze_resume(request, config=test_config, http_client=client)
 
 
 def test_analyze_resume_sample_files(test_config, valid_model_response):
@@ -152,7 +161,7 @@ def test_analyze_resume_sample_files(test_config, valid_model_response):
         result = analyze_resume(
             request,
             config=test_config,
-            client=_mock_client(valid_model_response, parsed=parsed),
+            http_client=_mock_http_client(valid_model_response),
         )
         assert 0 <= result["score"] <= 100
 
@@ -162,12 +171,11 @@ def test_keywords_grounding_in_prompt(
 ):
     """The Gemini call should include role keywords from keywords.py."""
     request = AnalyzeRequest.model_validate(valid_analyze_payload)
-    parsed = AnalyzeResponse.model_validate(valid_model_response)
-    client = _mock_client(valid_model_response, parsed=parsed)
+    client = _mock_http_client(valid_model_response)
 
-    analyze_resume(request, config=test_config, client=client)
+    analyze_resume(request, config=test_config, http_client=client)
 
-    prompt = client.models.generate_content.call_args.kwargs["contents"]
+    prompt = client.post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
     assert "python" in prompt.lower()
     assert "Target role:" in prompt
 

@@ -11,10 +11,17 @@ from typing import Any
 import gradio as gr
 import httpx
 from dotenv import load_dotenv
-from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
-from core import AnalyzeRequest, Config, analyze_resume, configure_logging
+from core import (
+    AnalyzeRequest,
+    Config,
+    GeminiAPIError,
+    GeminiClientError,
+    GeminiServerError,
+    analyze_resume,
+    configure_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,15 +149,15 @@ def analyze_handler(
     try:
         result = analyze_resume(analyze_request, config)
         return _format_result_as_markdown(result)
-    except genai_errors.ClientError as exc:
+    except GeminiClientError as exc:
         if exc.code == 429:
             return "AI service is busy. Please try again shortly."
         return "AI service request failed."
-    except genai_errors.ServerError:
+    except GeminiServerError:
         return "AI service temporarily unavailable."
     except httpx.TimeoutException:
         return "AI service timed out. Please try again."
-    except genai_errors.APIError:
+    except GeminiAPIError:
         return "AI service error."
     except json.JSONDecodeError:
         return "AI returned malformed data."
