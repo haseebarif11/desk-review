@@ -13,6 +13,19 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
+try:
+    import spaces
+except ImportError:
+    class _SpacesShim:
+        @staticmethod
+        def GPU():
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    spaces = _SpacesShim()  # type: ignore[assignment,misc]
+
 from core import (
     AnalyzeRequest,
     Config,
@@ -116,6 +129,7 @@ def _format_result_as_markdown(result: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+@spaces.GPU()
 def analyze_handler(
     resume: str,
     target_role: str,
