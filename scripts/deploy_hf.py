@@ -97,10 +97,25 @@ def main() -> int:
             commit_message="Deploy Desk Review to Hugging Face Spaces",
         )
 
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if gemini_key:
+            api.add_space_secret(
+                repo_id=SPACE_ID,
+                key="GEMINI_API_KEY",
+                value=gemini_key,
+                token=token,
+            )
+            api.add_space_variable(
+                repo_id=SPACE_ID,
+                key="RATE_LIMIT_DEFAULT",
+                value="3 per minute",
+                token=token,
+            )
+            print("Configured GEMINI_API_KEY secret and RATE_LIMIT_DEFAULT variable.")
+
     print(f"Deployed: https://huggingface.co/spaces/{SPACE_ID}")
     print(
-        "Next: Space Settings → Hardware → ZeroGPU; "
-        "Variables and secrets → GEMINI_API_KEY + RATE_LIMIT_DEFAULT=3 per minute"
+        "Next: Space Settings → Hardware → CPU basic (API-only; no GPU needed)."
     )
     return 0
 
