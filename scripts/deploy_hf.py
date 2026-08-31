@@ -22,7 +22,6 @@ COPY_ITEMS = (
     "pyproject.toml",
     ".gitignore",
     "samples",
-    ".github",
     "ARCHITECTURE.md",
 )
 

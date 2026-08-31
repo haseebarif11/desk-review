@@ -101,9 +101,7 @@ def valid_model_response() -> dict:
     }
 
 
-def _mock_http_client(
-    response_dict: dict, *, status_code: int = 200
-) -> MagicMock:
+def _mock_http_client(response_dict: dict, *, status_code: int = 200) -> MagicMock:
     """Build a mock httpx client returning a Gemini REST payload."""
     client = MagicMock()
     response = MagicMock()
@@ -139,6 +137,30 @@ def test_analyze_resume_returns_valid_schema(
     assert validated.next_steps
 
 
+def test_analyze_response_accepts_bracketed_placeholder_bullet_rewrite(
+    test_config, valid_analyze_payload, valid_model_response
+):
+    """Bracketed metric placeholders in bullet rewrites pass schema validation."""
+    response_with_placeholder = {
+        **valid_model_response,
+        "bullet_rewrites": [
+            {
+                "original": "Fixed backend issues in production.",
+                "improved": (
+                    "Resolved [X] backend issues, reducing incident response time."
+                ),
+            }
+        ],
+    }
+    request = AnalyzeRequest.model_validate(valid_analyze_payload)
+    client = _mock_http_client(response_with_placeholder)
+
+    result = analyze_resume(request, config=test_config, http_client=client)
+
+    validated = AnalyzeResponse.model_validate(result)
+    assert "[X]" in validated.bullet_rewrites[0].improved
+
+
 def test_analyze_resume_rejects_malformed_model_output(
     test_config, valid_analyze_payload
 ):
@@ -152,7 +174,6 @@ def test_analyze_resume_rejects_malformed_model_output(
 
 def test_analyze_resume_sample_files(test_config, valid_model_response):
     """Each sample resume file can be parsed and analyzed with a mock."""
-    parsed = AnalyzeResponse.model_validate(valid_model_response)
     for sample_path in SAMPLES_DIR.glob("*.txt"):
         request = AnalyzeRequest(
             resume=sample_path.read_text(encoding="utf-8"),
