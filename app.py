@@ -179,8 +179,7 @@ def _format_result_as_html(result: dict[str, Any]) -> str:
         ns_body = "<p class='muted'>None identified</p>"
 
     next_steps_section = (
-        f"<section class='next-steps-section'>"
-        f"<h3>Next steps</h3>{ns_body}</section>"
+        f"<section class='next-steps-section'><h3>Next steps</h3>{ns_body}</section>"
     )
 
     return (
